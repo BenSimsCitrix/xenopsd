@@ -3464,48 +3464,61 @@ module Backend = struct
               (Xenopsd_error
                  (Internal_error
                     (Printf.sprintf "unexpected disk for devid %d" devid)))
+      let open_file  params =
+        Unix.openfile params [ Unix.O_RDONLY ] 0o640
+
+      let open_socket  params =
+        let socket = Unix.(socket PF_UNIX SOCK_STREAM 0) in
+        Unix.connect socket Unix.(ADDR_UNIX params);
+        socket
+
+      let match_nbd_string nbd_split =
+      let pat = "nbd" in 
+      match (List.nth_opt nbd_split 0) with
+      | None -> false
+      | Some x -> String.equal pat x 
+
+      let get_fd_cd params =
+        let nbd_split = String.split_on_char ':' params in
+        if match_nbd_string nbd_split then ((open_socket (List.nth nbd_split 2)), "nbd", "nbd:fd:") else ((open_file params), "raw", "")
 
       let qemu_media_change ~xs device _type params =
-        Vbd_Common.qemu_media_change ~xs device _type params ;
+        Vbd_Common.qemu_media_change ~xs device _type params;
         try
-          let cd = cd_of device.backend.devid in
+          let cd    = cd_of device.backend.devid in
           let domid = device.frontend.domid in
           if params = "" then
-            qmp_send_cmd domid Qmp.(Eject (cd, Some true)) |> ignore
+            qmp_send_cmd domid Qmp.(Eject(cd, Some true)) |> ignore
           else
-            let as_msg cmd = Qmp.(Success (Some __LOC__, cmd)) in
-            let fd_cd = Unix.openfile params [Unix.O_RDONLY] 0o640 in
+            let as_msg cmd = Qmp.(Success(Some __LOC__, cmd)) in
+            let fd_cd, m_format, path_mod = (get_fd_cd params) in
             finally
               (fun () ->
-                let cmd = Qmp.(Add_fd None) in
-                let fd_info =
-                  match qmp_send_cmd ~send_fd:fd_cd domid cmd with
-                  | Qmp.Fd_info x ->
-                      x
-                  | other ->
-                      raise
-                        (Xenopsd_error
-                           (Internal_error
-                              (sprintf "Unexpected result for QMP command: %s"
-                                 Qmp.(other |> as_msg |> string_of_message))))
-                in
-                finally
-                  (fun () ->
-                    let path = sprintf "/dev/fdset/%d" fd_info.Qmp.fdset_id in
-                    let medium =
-                      Qmp.
-                        {
-                          medium_device= cd
-                        ; medium_filename= path
-                        ; medium_format= Some "raw"
-                        }
-                    in
-                    let cmd = Qmp.(Blockdev_change_medium medium) in
-                    qmp_send_cmd domid cmd |> ignore)
-                  (fun () ->
-                    let cmd = Qmp.(Remove_fd fd_info.fdset_id) in
-                    qmp_send_cmd domid cmd |> ignore))
-              (fun () -> Unix.close fd_cd)
+                 let cmd     = Qmp.(Add_fd None) in
+                 let fd_info = match qmp_send_cmd ~send_fd:fd_cd domid cmd with
+                   | Qmp.Fd_info x -> x
+                   | other ->
+                     raise (Xenopsd_error (Internal_error
+                              (sprintf
+                                 "Unexpected result for QMP command: %s"
+                                 Qmp.(other |> as_msg |> string_of_message)))) in
+                 finally
+                   (fun () ->
+                      let path = sprintf "%d" fd_info.Qmp.fdset_id in
+                      let medium = Qmp.
+                        { medium_device   = cd
+                        ; medium_filename = path_mod^path
+                        ; medium_format   = Some m_format
+                        } in
+                      let cmd  = Qmp.(Blockdev_change_medium medium) in
+                      qmp_send_cmd domid cmd |> ignore)
+                   (fun () ->
+    		      debug "Hello ben 1"
+                      (*let cmd = Qmp.(Remove_fd fd_info.fdset_id) in
+                      qmp_send_cmd domid cmd |> ignore*)))
+              (fun () ->
+    		 debug "Hello ben 1"
+                 (*Unix.close fd_cd*))
         with
         | Unix.Unix_error (Unix.ECONNREFUSED, "connect", p) ->
             raise
